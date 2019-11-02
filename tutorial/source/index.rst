@@ -44,21 +44,28 @@ Welcome to Pyro Examples and Tutorials!
 
    gmm
    gp
+   gplvm
    bo
+   easyguide
    tracking_1d
    csis
    RSA-implicature
    RSA-hyperbole
    ekf
+   working_memory
 
 .. toctree::
    :maxdepth: 2
    :caption: Code Examples:
 
+   capture_recapture
    hmm
    lda
    mcmc
    sparse_gamma
+   dkl
+   einsum
+   smcfilter
 
 
 Indices and tables

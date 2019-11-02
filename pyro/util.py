@@ -1,22 +1,22 @@
-from __future__ import absolute_import, division, print_function
-
 import functools
 import numbers
 import random
+import timeit
 import warnings
 from collections import defaultdict
-from contextlib2 import contextmanager
+from itertools import zip_longest
 
 import graphviz
 import torch
-from six.moves import zip_longest
+from contextlib import contextmanager
 
 from pyro.poutine.util import site_is_subsample
 
 
 def set_rng_seed(rng_seed):
     """
-    Sets seeds of torch and torch.cuda (if available).
+    Sets seeds of `torch` and `torch.cuda` (if available).
+
     :param int rng_seed: The seed value.
     """
     torch.manual_seed(rng_seed)
@@ -26,6 +26,24 @@ def set_rng_seed(rng_seed):
         np.random.seed(rng_seed)
     except ImportError:
         pass
+
+
+def get_rng_state():
+    state = {'torch': torch.get_rng_state(), 'random': random.getstate()}
+    try:
+        import numpy as np
+        state['numpy'] = np.random.get_state()
+    except ImportError:
+        pass
+    return state
+
+
+def set_rng_state(state):
+    torch.set_rng_state(state['torch'])
+    random.setstate(state['random'])
+    if 'numpy' in state:
+        import numpy as np
+        np.random.set_state(state['numpy'])
 
 
 def torch_isnan(x):
@@ -63,7 +81,7 @@ def warn_if_inf(value, msg="", allow_posinf=False, allow_neginf=False):
     also works with numbers.
     """
     if torch.is_tensor(value) and value.requires_grad:
-            value.register_hook(lambda x: warn_if_inf(x, msg, allow_posinf, allow_neginf))
+        value.register_hook(lambda x: warn_if_inf(x, msg, allow_posinf, allow_neginf))
     if (not allow_posinf) and (value == float('inf') if isinstance(value, numbers.Number)
                                else (value == float('inf')).any()):
         warnings.warn("Encountered +inf{}".format((': ' if msg else '.') + msg), stacklevel=2)
@@ -261,7 +279,13 @@ def check_site_shape(site, max_plate_nesting):
                 '- .to_event(...) the distribution being sampled',
                 '- .permute() data dimensions']))
 
-    # TODO Check parallel dimensions on the left of max_plate_nesting.
+    # Check parallel dimensions on the left of max_plate_nesting.
+    enum_dim = site["infer"].get("_enumerate_dim")
+    if enum_dim is not None:
+        if len(site["fn"].batch_shape) >= -enum_dim and site["fn"].batch_shape[enum_dim] != 1:
+            raise ValueError('\n  '.join([
+                'Enumeration dim conflict at site "{}"'.format(site["name"]),
+                'Try increasing pyro.markov history size']))
 
 
 def _are_independent(counters1, counters2):
@@ -330,9 +354,15 @@ def ignore_jit_warnings(filter=None):
     Ignore JIT tracer warnings with messages that match `filter`. If
     `filter` is not specified all tracer warnings are ignored.
 
+    Note this only installs warning filters if executed within traced code.
+
     :param filter: A list containing either warning message (str),
         or tuple consisting of (warning message (str), Warning class).
     """
+    if not torch._C._get_tracing_state():
+        yield
+        return
+
     with warnings.catch_warnings():
         if filter is None:
             warnings.filterwarnings("ignore",
@@ -360,15 +390,31 @@ def jit_iter(tensor):
         return list(tensor)
 
 
-@contextmanager
-def optional(context_manager, condition):
+class optional(object):
     """
     Optionally wrap inside `context_manager` if condition is `True`.
     """
-    if condition:
-        with context_manager:
-            yield
-    else:
+    def __init__(self, context_manager, condition):
+        self.context_manager = context_manager
+        self.condition = condition
+
+    def __enter__(self):
+        if self.condition:
+            return self.context_manager.__enter__()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.condition:
+            return self.context_manager.__exit__(exc_type, exc_val, exc_tb)
+
+
+class ExperimentalWarning(UserWarning):
+    pass
+
+
+@contextmanager
+def ignore_experimental_warning():
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', category=ExperimentalWarning)
         yield
 
 
@@ -378,6 +424,17 @@ def deep_getattr(obj, name):
     Throws an AttributeError if bad attribute
     """
     return functools.reduce(getattr, name.split("."), obj)
+
+
+class timed(object):
+    def __enter__(self, timer=timeit.default_timer):
+        self.start = timer()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.end = timeit.default_timer()
+        self.elapsed = self.end - self.start
+        return self.elapsed
 
 
 # work around https://github.com/pytorch/pytorch/issues/11829

@@ -1,9 +1,7 @@
-from __future__ import absolute_import, division, print_function
-
 import copy
 import warnings
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from inspect import isclass
 
 import pyro.distributions as dist
@@ -39,8 +37,22 @@ def param(name, *args, **kwargs):
     To interact with the param store or write to disk,
     see `Parameters <parameters.html>`_.
 
-    :param name: name of parameter
+    :param str name: name of parameter
+    :param init_tensor: initial tensor or lazy callable that returns a tensor.
+        For large tensors, it may be cheaper to write e.g.
+        ``lambda: torch.randn(100000)``, which will only be evaluated on the
+        initial statement.
+    :type init_tensor: torch.Tensor or callable
+    :param constraint: torch constraint, defaults to ``constraints.real``.
+    :type constraint: torch.distributions.constraints.Constraint
+    :param int event_dim: (optional) number of rightmost dimensions unrelated
+        to baching. Dimension to the left of this will be considered batch
+        dimensions; if the param statement is inside a subsampled plate, then
+        corresponding batch dimensions of the parameter will be correspondingly
+        subsampled. If unspecified, all dimensions will be considered event
+        dims and no subsampling will be performed.
     :returns: parameter
+    :rtype: torch.Tensor
     """
     kwargs["name"] = name
     return _param(name, *args, **kwargs)
@@ -97,6 +109,19 @@ def sample(name, fn, *args, **kwargs):
         # apply the stack and return its return value
         apply_stack(msg)
         return msg["value"]
+
+
+def factor(name, log_factor):
+    """
+    Factor statement to add arbitrary log probability factor to a
+    probabilisitic model.
+
+    :param str name: Name of the trivial sample
+    :param torch.Tensor log_factor: A possibly batched log probability factor.
+    """
+    unit_dist = dist.Unit(log_factor)
+    unit_value = unit_dist.sample()
+    sample(name, unit_dist, obs=unit_value)
 
 
 class plate(PlateMessenger):
@@ -218,6 +243,25 @@ class irange(SubsampleMessenger):
         super(irange, self).__init__(*args, **kwargs)
 
 
+@contextmanager
+def plate_stack(prefix, sizes, rightmost_dim=-1):
+    """
+    Create a contiguous stack of :class:`plate` s with dimensions::
+
+        rightmost_dim - len(sizes), ..., rightmost_dim
+
+    :param str prefix: Name prefix for plates.
+    :param iterable sizes: An iterable of plate sizes.
+    :param int rightmost_dim: The rightmost dim, counting from the right.
+    """
+    assert rightmost_dim < 0
+    with ExitStack() as stack:
+        for i, size in enumerate(reversed(sizes)):
+            plate_i = plate("{}_{}".format(prefix, i), size, dim=rightmost_dim - i)
+            stack.enter_context(plate_i)
+        yield
+
+
 def module(name, nn_module, update_module_params=False):
     """
     Takes a torch.nn.Module and registers its parameters with the ParamStore.
@@ -245,13 +289,17 @@ def module(name, nn_module, update_module_params=False):
     target_state_dict = OrderedDict()
 
     for param_name, param_value in nn_module.named_parameters():
-        # register the parameter in the module with pyro
-        # this only does something substantive if the parameter hasn't been seen before
-        full_param_name = param_with_module_name(name, param_name)
-        returned_param = param(full_param_name, param_value)
+        if param_value.requires_grad:
+            # register the parameter in the module with pyro
+            # this only does something substantive if the parameter hasn't been seen before
+            full_param_name = param_with_module_name(name, param_name)
+            returned_param = param(full_param_name, param_value)
 
-        if param_value._cdata != returned_param._cdata:
-            target_state_dict[param_name] = returned_param
+            if param_value._cdata != returned_param._cdata:
+                target_state_dict[param_name] = returned_param
+        else:
+            warnings.warn("{} was not registered in the param store because".format(param_name) +
+                          " requires_grad=False")
 
     if target_state_dict and update_module_params:
         # WARNING: this is very dangerous. better method?
@@ -273,9 +321,9 @@ def module(name, nn_module, update_module_params=False):
 
 
 def random_module(name, nn_module, prior, *args, **kwargs):
-    """
+    r"""
     Places a prior over the parameters of the module `nn_module`.
-    Returns a distribution (callable) over `nn.Module`s, which
+    Returns a distribution (callable) over `nn.Module`\s, which
     upon calling returns a sampled `nn.Module`.
 
     See the `Bayesian Regression tutorial <http://pyro.ai/examples/bayesian_regression.html>`_

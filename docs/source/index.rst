@@ -29,13 +29,14 @@ Pyro Documentation
    :maxdepth: 2
    :caption: Contributed Code:
 
-   contrib.autoguide
    contrib.autoname
    contrib.bnn
+   contrib.easyguide
    contrib.glmm
    contrib.gp
    contrib.minipyro
    contrib.oed
+   contrib.timeseries
    contrib.tracking
 
 

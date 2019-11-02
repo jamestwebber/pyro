@@ -11,9 +11,10 @@ GID=$(shell id -g)
 OSTYPE=$(shell uname)
 USER=pyromancer
 DOCKER_WORK_DIR=/home/${USER}/workspace/shared
+pyro_git_url=https://github.com/pyro-ppl/pyro.git
 
 # Optional args
-python_version?=2.7
+python_version?=3.6
 pytorch_branch?=release
 pyro_branch?=release
 cmd?=bash
@@ -40,7 +41,7 @@ build: ##
 	## Build a docker image for running Pyro on a CPU.
 	## Requires nvidia-docker (https://github.com/NVIDIA/nvidia-docker).
 	## Args:
-	##   python_version: version of python to use. default - python 2.7
+	##   python_version: version of python to use. default - python 3.6
 	##   pytorch_branch: whether to build PyTorch from conda or from source
 	##   (git branch specified by pytorch_branch)
 	##     default - latest pytorch version on conda
@@ -54,13 +55,14 @@ build: ##
 	--build-arg ostype=${OSTYPE} \
 	--build-arg python_version=${python_version} \
 	--build-arg pytorch_branch=${pytorch_branch} \
+	--build-arg pyro_git_url=${pyro_git_url} \
 	--build-arg pyro_branch=${pyro_branch} -f ${DOCKER_FILE} .
 
 build-gpu: ##
 	## Build a docker image for running Pyro on a GPU.
 	## Requires nvidia-docker (https://github.com/NVIDIA/nvidia-docker).
 	## Args:
-	##   python_version: version of python to use. default - python 2.7
+	##   python_version: version of python to use. default - python 3.6
 	##   pytorch_branch: whether to build PyTorch from conda or from source
 	##   (git branch specified by pytorch_branch)
 	##     default - latest pytorch version on conda
@@ -75,6 +77,7 @@ build-gpu: ##
 	--build-arg cuda=1 \
 	--build-arg python_version=${python_version} \
 	--build-arg pytorch_branch=${pytorch_branch} \
+	--build-arg pyro_git_url=${pyro_git_url} \
 	--build-arg pyro_branch=${pyro_branch} -f ${DOCKER_FILE} .
 
 create-host-workspace: ##

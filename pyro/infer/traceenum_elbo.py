@@ -1,12 +1,10 @@
-from __future__ import absolute_import, division, print_function
-
 import warnings
 import weakref
 from collections import OrderedDict
+import queue
 
 import torch
 from opt_einsum import shared_intermediates
-from six.moves import queue
 
 import pyro
 import pyro.distributions as dist
@@ -18,6 +16,7 @@ from pyro.infer.enum import get_importance_trace, iter_discrete_escape, iter_dis
 from pyro.infer.util import Dice, is_validation_enabled
 from pyro.ops import packed
 from pyro.ops.contract import contract_tensor_tree, contract_to_tensor
+from pyro.ops.rings import SampleRing
 from pyro.poutine.enumerate_messenger import EnumerateMessenger
 from pyro.util import check_traceenum_requirements, ignore_jit_warnings, warn_if_nan
 
@@ -101,7 +100,10 @@ def _compute_model_factors(model_trace, guide_trace):
             else:
                 # For sites that depend on an enumerated variable, we need to apply
                 # the mask inside- and the scale outside- of the log expectation.
-                cost = packed.scale_and_mask(site["packed"]["unscaled_log_prob"], mask=site["packed"]["mask"])
+                if "masked_log_prob" not in site["packed"]:
+                    site["packed"]["masked_log_prob"] = packed.scale_and_mask(
+                        site["packed"]["unscaled_log_prob"], mask=site["packed"]["mask"])
+                cost = site["packed"]["masked_log_prob"]
                 log_factors.setdefault(t, []).append(cost)
                 scales.append(site["scale"])
     if log_factors:
@@ -121,6 +123,11 @@ def _compute_dice_elbo(model_trace, guide_trace):
     marginal_costs, log_factors, ordering, sum_dims, scale = _compute_model_factors(
             model_trace, guide_trace)
     if log_factors:
+        dim_to_size = {}
+        for terms in log_factors.values():
+            for term in terms:
+                dim_to_size.update(zip(term._pyro_dims, term.shape))
+
         # Note that while most applications of tensor message passing use the
         # contract_to_tensor() interface and can be easily refactored to use ubersum(),
         # the application here relies on contract_tensor_tree() to extract the dependency
@@ -130,7 +137,9 @@ def _compute_dice_elbo(model_trace, guide_trace):
         # replace contract_tensor_tree() with a RaggedTensor -> RaggedTensor contraction
         # that preserves some dependency structure.
         with shared_intermediates() as cache:
-            log_factors = contract_tensor_tree(log_factors, sum_dims, cache=cache)
+            ring = SampleRing(cache=cache, dim_to_size=dim_to_size)
+            log_factors = contract_tensor_tree(log_factors, sum_dims, ring=ring)
+            model_trace._sharing_cache = cache  # For TraceEnumSample_ELBO.
         for t, log_factors_t in log_factors.items():
             marginal_costs_t = marginal_costs.setdefault(t, [])
             for term in log_factors_t:
@@ -175,7 +184,7 @@ def _compute_marginals(model_trace, guide_trace):
             logits = packed.unpack(logits, model_trace.symbol_to_dim)
             logits = logits.unsqueeze(-1).transpose(-1, enum_dim - 1)
             while logits.shape[0] == 1:
-                logits.squeeze_(0)
+                logits = logits.squeeze(0)
             marginal_dists[name] = _make_dist(site["fn"], logits)
     return marginal_dists
 
@@ -216,7 +225,7 @@ class BackwardSampleMessenger(pyro.poutine.messenger.Messenger):
             logits = packed.unpack(logits, self.enum_trace.symbol_to_dim)
             logits = logits.unsqueeze(-1).transpose(-1, enum_dim - 1)
             while logits.shape[0] == 1:
-                logits.squeeze_(0)
+                logits = logits.squeeze(0)
         msg["fn"] = _make_dist(msg["fn"], logits)
 
     def _pyro_post_sample(self, msg):
@@ -443,7 +452,8 @@ class JitTraceEnum_ELBO(TraceEnum_ELBO):
             # build a closure for differentiable_loss
             weakself = weakref.ref(self)
 
-            @pyro.ops.jit.trace(ignore_warnings=self.ignore_jit_warnings)
+            @pyro.ops.jit.trace(ignore_warnings=self.ignore_jit_warnings,
+                                jit_options=self.jit_options)
             def differentiable_loss(*args, **kwargs):
                 kwargs.pop('_model_id')
                 kwargs.pop('_guide_id')

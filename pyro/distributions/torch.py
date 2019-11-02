@@ -1,10 +1,37 @@
-from __future__ import absolute_import, division, print_function
-
 import torch
-from torch.distributions import constraints, kl_divergence, register_kl
+from torch.distributions import constraints
 
-from pyro.distributions.torch_distribution import IndependentConstraint, TorchDistributionMixin
-from pyro.distributions.util import sum_rightmost
+from pyro.distributions.constraints import IndependentConstraint
+from pyro.distributions.torch_distribution import TorchDistributionMixin
+
+
+# This overloads .log_prob() and .enumerate_support() to speed up evaluating
+# log_prob on the support of this variable: we can completely avoid tensor ops
+# and merely reshape the self.logits tensor. This is especially important for
+# Pyro models that use enumeration.
+class Categorical(torch.distributions.Categorical, TorchDistributionMixin):
+
+    def log_prob(self, value):
+        if getattr(value, '_pyro_categorical_support', None) == id(self):
+            # Assume value is a reshaped torch.arange(event_shape[0]).
+            # In this case we can call .reshape() rather than torch.gather().
+            if not torch._C._get_tracing_state():
+                if self._validate_args:
+                    self._validate_sample(value)
+                assert value.size(0) == self.logits.size(-1)
+            logits = self.logits
+            if logits.dim() <= value.dim():
+                logits = logits.reshape((1,) * (1 + value.dim() - logits.dim()) + logits.shape)
+            if not torch._C._get_tracing_state():
+                assert logits.size(-1 - value.dim()) == 1
+            return logits.transpose(-1 - value.dim(), -1).squeeze(-1)
+        return super(Categorical, self).log_prob(value)
+
+    def enumerate_support(self, expand=True):
+        result = super(Categorical, self).enumerate_support(expand=expand)
+        if not expand:
+            result._pyro_categorical_support = id(self)
+        return result
 
 
 class MultivariateNormal(torch.distributions.MultivariateNormal, TorchDistributionMixin):
@@ -23,16 +50,6 @@ class Independent(torch.distributions.Independent, TorchDistributionMixin):
     @_validate_args.setter
     def _validate_args(self, value):
         self.base_dist._validate_args = value
-
-
-@register_kl(Independent, Independent)
-def _kl_independent_independent(p, q):
-    if p.reinterpreted_batch_ndims != q.reinterpreted_batch_ndims:
-        raise NotImplementedError
-    kl = kl_divergence(p.base_dist, q.base_dist)
-    if p.reinterpreted_batch_ndims:
-        kl = sum_rightmost(kl, p.reinterpreted_batch_ndims)
-    return kl
 
 
 # Programmatically load all distributions from PyTorch.

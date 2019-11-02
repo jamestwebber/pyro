@@ -1,5 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
 import os
 import subprocess
 import sys
@@ -21,10 +19,15 @@ for line in open(os.path.join(PROJECT_PATH, 'pyro', '__init__.py')):
 # Append current commit sha to version
 commit_sha = ''
 try:
-    commit_sha = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'],
-                                         cwd=PROJECT_PATH).decode('ascii').strip()
-except OSError:
-    pass
+    current_tag = subprocess.check_output(['git', 'tag', '--points-at', 'HEAD'],
+                                          cwd=PROJECT_PATH).decode('ascii').strip()
+    # only add sha if HEAD does not point to the release tag
+    if not current_tag == version:
+        commit_sha = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'],
+                                             cwd=PROJECT_PATH).decode('ascii').strip()
+# catch all exception to be safe
+except Exception:
+    pass  # probably not a git repo
 
 # Write version to _version.py
 if commit_sha:
@@ -32,68 +35,64 @@ if commit_sha:
 with open(os.path.join(PROJECT_PATH, 'pyro', '_version.py'), 'w') as f:
     f.write(VERSION.format(version))
 
-# Convert README.md to rst for display at https://pypi.python.org/pypi/pyro-ppl
-# When releasing on pypi, make sure pandoc is on your system:
-# $ brew install pandoc          # OS X
-# $ sudo apt-get install pandoc  # Ubuntu Linux
+
+# READ README.md for long description on PyPi.
+# This requires uploading via twine, e.g.:
+# $ python setup.py sdist bdist_wheel
+# $ twine upload --repository-url https://test.pypi.org/legacy/ dist/*  # test version
+# $ twine upload dist/*
 try:
-    import pypandoc
-    long_description = pypandoc.convert('README.md', 'rst')
-except (IOError, ImportError, OSError) as e:
-    sys.stderr.write('Failed to convert README.md to rst:\n  {}\n'.format(e))
+    long_description = open('README.md', encoding='utf-8').read()
+except Exception as e:
+    sys.stderr.write('Failed to read README.md\n'.format(e))
     sys.stderr.flush()
-    long_description = open('README.md').read()
+    long_description = ''
 
 # Remove badges since they will always be obsolete.
-blacklist = ['Build Status', 'Latest Version', 'Documentation Status',
-             'travis-ci.org', 'pypi.python.org', 'pyro-ppl.readthedocs.io']
-long_description = '\n'.join(
-    [line for line in long_description.split('\n') if not any(patt in line for patt in blacklist)])
+# This assumes the first 12 lines contain badge info.
+long_description = '\n'.join([str(line) for line in long_description.split('\n')[12:]])
 
 # examples/tutorials
 EXTRAS_REQUIRE = [
     'jupyter>=1.0.0',
     'matplotlib>=1.3',
-    'observations>=0.1.4',
     'pillow',
-    'torchvision',
+    'torchvision>=0.4.0',
     'visdom>=0.1.4',
     'pandas',
     'seaborn',
     'wget',
 ]
 
-if sys.version_info[0] == 2:
-    EXTRAS_REQUIRE.append('functools32')
-
 setup(
     name='pyro-ppl',
     version=version,
     description='A Python library for probabilistic modeling and inference',
     long_description=long_description,
+    long_description_content_type='text/markdown',
     packages=find_packages(include=['pyro', 'pyro.*']),
+    package_data={"pyro.distributions": ["*.cpp"]},
     url='http://pyro.ai',
     author='Uber AI Labs',
     author_email='pyro@uber.com',
     install_requires=[
         # if you add any additional libraries, please also
         # add them to `docs/requirements.txt`
-        'contextlib2',
         'graphviz>=0.8',
-        'networkx>=2.2',
+        # numpy is necessary for some functionality of PyTorch
         'numpy>=1.7',
-        'opt_einsum>=2.3.0',
-        'six>=1.10.0',
-        'torch>=1.0.0',
-        'tqdm>=4.28',
+        'opt_einsum>=2.3.2',
+        'pyro-api>=0.1.1',
+        'torch>=1.3.0',
+        'tqdm>=4.36',
     ],
     extras_require={
         'extras': EXTRAS_REQUIRE,
         'test': EXTRAS_REQUIRE + [
             'nbval',
-            'pytest==3.7',
+            'pytest>=4.1',
             'pytest-cov',
-            'scipy>=0.19.0',
+            'scipy>=1.1',
         ],
         'profile': ['prettytable', 'pytest-benchmark', 'snakeviz'],
         'dev': EXTRAS_REQUIRE + [
@@ -103,16 +102,17 @@ setup(
             'nbsphinx>=0.3.2',
             'nbstripout',
             'nbval',
+            'ninja',
             'pypandoc',
-            'pytest==3.7',
+            'pytest>=4.1',
             'pytest-xdist',
-            'scipy>=0.19.0',
+            'scipy>=1.1',
             'sphinx',
             'sphinx_rtd_theme',
             'yapf',
         ],
     },
-    tests_require=['flake8', 'pytest==3.7'],
+    python_requires='>=3.5',
     keywords='machine learning statistics probabilistic programming bayesian modeling pytorch',
     license='MIT License',
     classifiers=[
@@ -121,8 +121,9 @@ setup(
         'Intended Audience :: Science/Research',
         'Operating System :: POSIX :: Linux',
         'Operating System :: MacOS :: MacOS X',
-        'Programming Language :: Python :: 2.7',
+        'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6',
+        'Programming Language :: Python :: 3.7',
     ],
     # yapf
 )

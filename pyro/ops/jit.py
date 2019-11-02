@@ -1,5 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
 import argparse
 import warnings
 import weakref
@@ -8,7 +6,7 @@ import torch
 
 import pyro
 import pyro.poutine as poutine
-from pyro.util import ignore_jit_warnings, optional
+from pyro.util import ignore_jit_warnings, optional, timed
 
 
 def _hash(value, allow_id):
@@ -50,10 +48,13 @@ class CompiledFunction(object):
     The actual PyTorch compilation artifact is stored in :attr:`compiled`.
     Call diagnostic methods on this attribute.
     """
-    def __init__(self, fn, ignore_warnings=False):
+    def __init__(self, fn, ignore_warnings=False, jit_options=None):
         self.fn = fn
         self.compiled = {}  # len(args) -> callable
         self.ignore_warnings = ignore_warnings
+        self.jit_options = {} if jit_options is None else jit_options
+        self.jit_options.setdefault('check_trace', False)
+        self.compile_time = None
         self._param_names = None
 
     def __call__(self, *args, **kwargs):
@@ -83,8 +84,14 @@ class CompiledFunction(object):
                     constrained_params[name] = constrained_param
                 return poutine.replay(self.fn, params=constrained_params)(*args, **kwargs)
 
-            with pyro.validation_enabled(False), optional(ignore_jit_warnings(), self.ignore_warnings):
-                self.compiled[key] = torch.jit.trace(compiled, params_and_args, check_trace=False)
+            if self.ignore_warnings:
+                compiled = ignore_jit_warnings()(compiled)
+            with pyro.validation_enabled(False):
+                time_compilation = self.jit_options.pop("time_compilation", False)
+                with optional(timed(), time_compilation) as t:
+                    self.compiled[key] = torch.jit.trace(compiled, params_and_args, **self.jit_options)
+                if time_compilation:
+                    self.compile_time = t.elapsed
         else:
             unconstrained_params = [pyro.param(name).unconstrained()
                                     for name in self._param_names]
@@ -102,7 +109,7 @@ class CompiledFunction(object):
         return ret
 
 
-def trace(fn=None, ignore_warnings=False):
+def trace(fn=None, ignore_warnings=False, jit_options=None):
     """
     Lazy replacement for :func:`torch.jit.trace` that works with
     Pyro functions that call :func:`pyro.param`.
@@ -121,7 +128,12 @@ def trace(fn=None, ignore_warnings=False):
             cond_model = pyro.condition(model, data={"y": y})
             tr = pyro.poutine.trace(cond_model).get_trace(x)
             return tr.log_prob_sum()
+
+    :param callable fn: The function to be traced.
+    :param bool ignore_warnins: Whether to ignore jit warnings.
+    :param dict jit_options: Optional dict of options to pass to
+        :func:`torch.jit.trace` , e.g. ``{"optimize": False}``.
     """
     if fn is None:
-        return lambda fn: trace(fn, ignore_warnings=ignore_warnings)
-    return CompiledFunction(fn, ignore_warnings=ignore_warnings)
+        return lambda fn: trace(fn, ignore_warnings=ignore_warnings, jit_options=jit_options)
+    return CompiledFunction(fn, ignore_warnings=ignore_warnings, jit_options=jit_options)

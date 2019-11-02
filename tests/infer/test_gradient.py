@@ -1,5 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
 import logging
 
 import numpy as np
@@ -48,11 +46,10 @@ def test_subsample_gradient(Elbo, reparameterized, subsample, local_samples, sca
             pyro.sample("x", Normal(z, 1), obs=x)
 
     def guide(subsample):
-        loc = pyro.param("loc", lambda: torch.zeros(len(data), requires_grad=True))
-        scale = pyro.param("scale", lambda: torch.tensor([1.0], requires_grad=True))
-        with pyro.plate("data", len(data), subsample_size, subsample) as ind:
-            loc_ind = loc[ind]
-            pyro.sample("z", Normal(loc_ind, scale))
+        scale = pyro.param("scale", lambda: torch.tensor([1.0]))
+        with pyro.plate("data", len(data), subsample_size, subsample):
+            loc = pyro.param("loc", lambda: torch.zeros(len(data)), event_dim=0)
+            pyro.sample("z", Normal(loc, scale))
 
     if scale != 1.0:
         model = poutine.scale(model, scale=scale)
@@ -71,10 +68,10 @@ def test_subsample_gradient(Elbo, reparameterized, subsample, local_samples, sca
     inference = SVI(model, guide, optim, loss=elbo)
     with xfail_if_not_implemented():
         if subsample_size == 1:
-            inference.loss_and_grads(model, guide, subsample=torch.LongTensor([0]))
-            inference.loss_and_grads(model, guide, subsample=torch.LongTensor([1]))
+            inference.loss_and_grads(model, guide, subsample=torch.tensor([0], dtype=torch.long))
+            inference.loss_and_grads(model, guide, subsample=torch.tensor([1], dtype=torch.long))
         else:
-            inference.loss_and_grads(model, guide, subsample=torch.LongTensor([0, 1]))
+            inference.loss_and_grads(model, guide, subsample=torch.tensor([0, 1], dtype=torch.long))
     params = dict(pyro.get_param_store().named_parameters())
     normalizer = 2 if subsample else 1
     actual_grads = {name: param.grad.detach().cpu().numpy() / normalizer for name, param in params.items()}

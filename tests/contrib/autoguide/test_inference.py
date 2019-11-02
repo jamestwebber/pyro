@@ -1,5 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
 import logging
 
 import numpy as np
@@ -10,8 +8,8 @@ from torch.distributions import biject_to, constraints
 import pyro
 import pyro.distributions as dist
 import pyro.optim as optim
-from pyro.contrib.autoguide import (AutoDiagonalNormal, AutoLaplaceApproximation,
-                                    AutoLowRankMultivariateNormal, AutoMultivariateNormal)
+from pyro.infer.autoguide import (AutoDiagonalNormal, AutoLaplaceApproximation,
+                                  AutoLowRankMultivariateNormal, AutoMultivariateNormal)
 from pyro.infer import SVI, Trace_ELBO, TraceMeanField_ELBO
 from tests.common import assert_equal
 from tests.integration_tests.test_conjugate_gaussian_models import GaussianChain
@@ -51,7 +49,7 @@ class AutoGaussianChain(GaussianChain):
                      .format(self.target_auto_diag_cov[1:].detach().cpu().numpy()))
 
         # TODO speed up with parallel num_particles > 1
-        adam = optim.Adam({"lr": .0005, "betas": (0.95, 0.999)})
+        adam = optim.Adam({"lr": .001, "betas": (0.95, 0.999)})
         svi = SVI(self.model, self.guide, adam, loss=Trace_ELBO())
 
         for k in range(n_steps):

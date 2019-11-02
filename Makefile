@@ -22,7 +22,7 @@ scrub: FORCE
 	find tutorial -name "*.ipynb" | xargs python tutorial/source/cleannb.py
 
 doctest: FORCE
-	pytest -p tests.doctest_fixtures --doctest-modules -o filterwarnings=ignore pyro
+	python -m pytest -p tests.doctest_fixtures --doctest-modules -o filterwarnings=ignore pyro
 
 format: FORCE
 	isort --recursive *.py pyro/ examples/ tests/ profiler/*.py docs/source/conf.py
@@ -39,7 +39,7 @@ test: lint docs doctest FORCE
 	pytest -vx -n auto --stage unit
 
 test-examples: lint FORCE
-	pytest -vx -n auto --stage test_examples
+	pytest -vx --stage test_examples
 
 test-tutorials: lint FORCE
 	grep -l smoke_test tutorial/source/*.ipynb | xargs grep -L 'smoke_test = False' \
@@ -57,6 +57,10 @@ test-cuda: lint FORCE
 	CUDA_TEST=1 PYRO_TENSOR_TYPE=torch.cuda.DoubleTensor pytest -vx --stage unit
 	CUDA_TEST=1 pytest -vx tests/test_examples.py::test_cuda
 
+test-cuda-lax: lint FORCE
+	CUDA_TEST=1 PYRO_TENSOR_TYPE=torch.cuda.DoubleTensor pytest -vx --stage unit --lax
+	CUDA_TEST=1 pytest -vx tests/test_examples.py::test_cuda
+
 test-jit: FORCE
 	@echo See jit.log
 	pytest -v -n auto --tb=short --runxfail tests/infer/test_jit.py tests/test_examples.py::test_jit | tee jit.log
@@ -64,6 +68,6 @@ test-jit: FORCE
 		-k JIT=True | tee -a jit.log
 
 clean: FORCE
-	git clean -dfx -e pyro-egg.info
+	git clean -dfx -e pyro_ppl.egg-info
 
 FORCE:

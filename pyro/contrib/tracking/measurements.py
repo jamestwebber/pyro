@@ -1,12 +1,10 @@
 from abc import ABCMeta, abstractmethod
-from six import add_metaclass
 
 import torch
 from pyro.distributions.util import eye_like
 
 
-@add_metaclass(ABCMeta)
-class Measurement(object):
+class Measurement(object, metaclass=ABCMeta):
     '''
     Gaussian measurement interface.
 
@@ -116,7 +114,7 @@ class PositionMeasurement(DifferentiableMeasurement):
         super(PositionMeasurement, self).__init__(mean, cov, time=time, frame_num=frame_num)
         self._jacobian = torch.cat([
             eye_like(mean, self.dimension),
-            mean.new_zeros((self.dimension, self.dimension))], dim=1)
+            torch.zeros(self.dimension, self.dimension, dtype=mean.dtype, device=mean.device)], dim=1)
 
     def __call__(self, x, do_normalization=True):
         '''

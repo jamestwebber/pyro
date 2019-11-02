@@ -11,21 +11,24 @@ module.
 An accompanying example that makes use of this implementation can be
 found at examples/minipyro.py.
 """
-from __future__ import absolute_import, division, print_function
-
+import random
+import warnings
+import weakref
 from collections import OrderedDict
 
 import torch
 
+from pyro.distributions import validation_enabled
+
 # Pyro keeps track of two kinds of global state:
 # i)  The effect handler stack, which enables non-standard interpretations of
 #     Pyro primitives like sample();
-#     See http://docs.pyro.ai/en/0.3.0-release/poutine.html
+#     See http://docs.pyro.ai/en/0.3.1/poutine.html
 # ii) Trainable parameters in the Pyro ParamStore;
-#     See http://docs.pyro.ai/en/0.3.0-release/parameters.html
+#     See http://docs.pyro.ai/en/0.3.1/parameters.html
 
 PYRO_STACK = []
-PARAM_STORE = {}
+PARAM_STORE = {}  # maps name -> (unconstrained_value, constraint)
 
 
 def get_param_store():
@@ -69,7 +72,8 @@ class trace(Messenger):
     # trace illustrates why we need postprocess_message in addition to process_message:
     # We only want to record a value after all other effects have been applied
     def postprocess_message(self, msg):
-        assert msg["name"] not in self.trace, "all sites must have unique names"
+        assert msg["type"] != "sample" or msg["name"] not in self.trace, \
+            "sample sites must have unique names"
         self.trace[msg["name"]] = msg.copy()
 
     def get_trace(self, *args, **kwargs):
@@ -103,6 +107,31 @@ class block(Messenger):
     def process_message(self, msg):
         if self.hide_fn(msg):
             msg["stop"] = True
+
+
+# seed is used to fix the RNG state when calling a model.
+class seed(Messenger):
+    def __init__(self, fn=None, rng_seed=None):
+        self.rng_seed = rng_seed
+        super(seed, self).__init__(fn)
+
+    def __enter__(self):
+        self.old_state = {'torch': torch.get_rng_state(), 'random': random.getstate()}
+        torch.manual_seed(self.rng_seed)
+        random.seed(self.rng_seed)
+        try:
+            import numpy as np
+            np.random.seed(self.rng_seed)
+            self.old_state['numpy'] = np.random.get_state()
+        except ImportError:
+            pass
+
+    def __exit__(self, type, value, traceback):
+        torch.set_rng_state(self.old_state['torch'])
+        random.setstate(self.old_state['random'])
+        if 'numpy' in self.old_state:
+            import numpy as np
+            np.random.set_state(self.old_state['numpy'])
 
 
 # This limited implementation of PlateMessenger only implements broadcasting.
@@ -147,18 +176,20 @@ def apply_stack(msg):
 
 # sample is an effectful version of Distribution.sample(...)
 # When any effect handlers are active, it constructs an initial message and calls apply_stack.
-def sample(name, fn, obs=None):
+def sample(name, fn, *args, **kwargs):
+    obs = kwargs.pop('obs', None)
 
     # if there are no active Messengers, we just draw a sample and return it as expected:
     if not PYRO_STACK:
-        return fn()
+        return fn(*args, **kwargs)
 
     # Otherwise, we initialize a message...
     initial_msg = {
         "type": "sample",
         "name": name,
         "fn": fn,
-        "args": (),
+        "args": args,
+        "kwargs": kwargs,
         "value": obs,
     }
 
@@ -167,25 +198,39 @@ def sample(name, fn, obs=None):
     return msg["value"]
 
 
-# param is an effectful version of PARAM_STORE.setdefault
+# param is an effectful version of PARAM_STORE.setdefault that also handles constraints.
 # When any effect handlers are active, it constructs an initial message and calls apply_stack.
-def param(name, init_value=None):
+def param(name, init_value=None, constraint=torch.distributions.constraints.real, event_dim=None):
+    if event_dim is not None:
+        raise NotImplementedError("minipyro.plate does not support the event_dim arg")
 
-    def fn(init_value):
-        value = PARAM_STORE.setdefault(name, init_value)
-        value.requires_grad_()
-        return value
+    def fn(init_value, constraint):
+        if name in PARAM_STORE:
+            unconstrained_value, constraint = PARAM_STORE[name]
+        else:
+            # Initialize with a constrained value.
+            assert init_value is not None
+            with torch.no_grad():
+                constrained_value = init_value.detach()
+                unconstrained_value = torch.distributions.transform_to(constraint).inv(constrained_value)
+            unconstrained_value.requires_grad_()
+            PARAM_STORE[name] = unconstrained_value, constraint
+
+        # Transform from unconstrained space to constrained space.
+        constrained_value = torch.distributions.transform_to(constraint)(unconstrained_value)
+        constrained_value.unconstrained = weakref.ref(unconstrained_value)
+        return constrained_value
 
     # if there are no active Messengers, we just draw a sample and return it as expected:
     if not PYRO_STACK:
-        return fn(init_value)
+        return fn(init_value, constraint)
 
     # Otherwise, we initialize a message...
     initial_msg = {
         "type": "param",
         "name": name,
         "fn": fn,
-        "args": (init_value,),
+        "args": (init_value, constraint),
         "value": None,
     }
 
@@ -195,13 +240,15 @@ def param(name, init_value=None):
 
 
 # boilerplate to match the syntax of actual pyro.plate:
-def plate(name, size, dim):
+def plate(name, size, dim=None):
+    if dim is None:
+        raise NotImplementedError("minipyro.plate requires a dim arg")
     return PlateMessenger(fn=None, size=size, dim=dim)
 
 
 # This is a thin wrapper around the `torch.optim.Adam` class that
 # dynamically generates optimizers for dynamically generated parameters.
-# See http://docs.pyro.ai/en/0.3.0-release/optimization.html
+# See http://docs.pyro.ai/en/0.3.1/optimization.html
 class Adam(object):
     def __init__(self, optim_args):
         self.optim_args = optim_args
@@ -226,7 +273,7 @@ class Adam(object):
 
 # This is a unified interface for stochastic variational inference in Pyro.
 # The actual construction of the loss is taken care of by `loss`.
-# See http://docs.pyro.ai/en/0.3.0-release/inference_algos.html
+# See http://docs.pyro.ai/en/0.3.1/inference_algos.html
 class SVI(object):
     def __init__(self, model, guide, optim, loss):
         self.model = model
@@ -247,12 +294,13 @@ class SVI(object):
         # Differentiate the loss.
         loss.backward()
         # Grab all the parameters from the trace.
-        params = [site["value"] for site in param_capture.values()]
+        params = [site["value"].unconstrained()
+                  for site in param_capture.values()]
         # Take a step w.r.t. each parameter in params.
         self.optim(params)
         # Zero out the gradients so that they don't accumulate.
         for p in params:
-            p.grad = p.new_zeros(p.shape)
+            p.grad = torch.zeros_like(p)
         return loss.item()
 
 
@@ -260,7 +308,7 @@ class SVI(object):
 # fundamental objective in Variational Inference.
 # See http://pyro.ai/examples/svi_part_i.html for details.
 # This implementation has various limitations (for example it only supports
-# random variablbes with reparameterized samplers), but all the ELBO
+# random variables with reparameterized samplers), but all the ELBO
 # implementations in Pyro share the same basic logic.
 def elbo(model, guide, *args, **kwargs):
     # Run the guide with the arguments passed to SVI.step() and trace the execution,
@@ -289,3 +337,49 @@ def elbo(model, guide, *args, **kwargs):
     # Return (-elbo) since by convention we do gradient descent on a loss and
     # the ELBO is a lower bound that needs to be maximized.
     return -elbo
+
+
+# This is a wrapper for compatibility with full Pyro.
+def Trace_ELBO(**kwargs):
+    return elbo
+
+
+# This is a Jit wrapper around elbo() that (1) delays tracing until the first
+# invocation, and (2) registers pyro.param() statements with torch.jit.trace.
+# This version does not support variable number of args or non-tensor kwargs.
+class JitTrace_ELBO(object):
+    def __init__(self, **kwargs):
+        self.ignore_jit_warnings = kwargs.pop("ignore_jit_warnings", False)
+        self._compiled = None
+        self._param_trace = None
+
+    def __call__(self, model, guide, *args):
+        # On first call, initialize params and save their names.
+        if self._param_trace is None:
+            with block(), trace() as tr, block(hide_fn=lambda m: m["type"] != "param"):
+                elbo(model, guide, *args)
+            self._param_trace = tr
+
+        # Augment args with reads from the global param store.
+        unconstrained_params = tuple(param(name).unconstrained()
+                                     for name in self._param_trace)
+        params_and_args = unconstrained_params + args
+
+        # On first call, create a compiled elbo.
+        if self._compiled is None:
+
+            def compiled(*params_and_args):
+                unconstrained_params = params_and_args[:len(self._param_trace)]
+                args = params_and_args[len(self._param_trace):]
+                for name, unconstrained_param in zip(self._param_trace, unconstrained_params):
+                    constrained_param = param(name)  # assume param has been initialized
+                    assert constrained_param.unconstrained() is unconstrained_param
+                    self._param_trace[name]["value"] = constrained_param
+                return replay(elbo, guide_trace=self._param_trace)(model, guide, *args)
+
+            with validation_enabled(False), warnings.catch_warnings():
+                if self.ignore_jit_warnings:
+                    warnings.filterwarnings("ignore", category=torch.jit.TracerWarning)
+                self._compiled = torch.jit.trace(compiled, params_and_args, check_trace=False)
+
+        return self._compiled(*params_and_args)

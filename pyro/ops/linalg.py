@@ -1,5 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
 import math
 
 import torch
@@ -17,7 +15,7 @@ def rinverse(M, sym=False):
         return 1./M
     elif M.shape[-1] == 2:
         det = M[..., 0, 0]*M[..., 1, 1] - M[..., 1, 0]*M[..., 0, 1]
-        inv = M.new_empty(M.shape)
+        inv = torch.empty_like(M)
         inv[..., 0, 0] = M[..., 1, 1]
         inv[..., 1, 1] = M[..., 0, 0]
         inv[..., 0, 1] = -M[..., 0, 1]
@@ -26,20 +24,7 @@ def rinverse(M, sym=False):
     elif M.shape[-1] == 3:
         return inv3d(M, sym=sym)
     else:
-        # Use blockwise inversion
-        d = M.shape[-1]//2
-        A, B, C, D = M[..., :d, :d], M[..., :d, d:], M[..., d:, :d], M[..., d:, d:]
-        Ainv = rinverse(A, sym=sym)
-        schur = rinverse(D - C.matmul(Ainv).matmul(B), sym=sym)
-        inv = M.new_empty(M.shape)
-        inv[..., :d, :d] = Ainv + Ainv.matmul(B).matmul(schur).matmul(C).matmul(Ainv)
-        inv[..., :d, d:] = -Ainv.matmul(B).matmul(schur)
-        if sym:
-            inv[..., d:, :d] = inv[..., :d, d:].transpose(-1, -2)
-        else:
-            inv[..., d:, :d] = -schur.matmul(C).matmul(Ainv)
-        inv[..., d:, d:] = schur
-        return inv
+        return torch.inverse(M)
 
 
 def determinant_3d(H):
@@ -78,7 +63,7 @@ def inv3d(H, sym=False):
     Calculates the inverse of a batched 3-D matrix
     """
     detH = determinant_3d(H)
-    Hinv = H.new_empty(H.shape)
+    Hinv = torch.empty_like(H)
     Hinv[..., 0, 0] = H[..., 1, 1] * H[..., 2, 2] - H[..., 1, 2] * H[..., 2, 1]
     Hinv[..., 1, 1] = H[..., 0, 0] * H[..., 2, 2] - H[..., 0, 2] * H[..., 2, 0]
     Hinv[..., 2, 2] = H[..., 0, 0] * H[..., 1, 1] - H[..., 0, 1] * H[..., 1, 0]

@@ -1,10 +1,6 @@
-from __future__ import absolute_import, division, print_function
-
 import logging
 import warnings
 from abc import ABCMeta, abstractmethod
-
-from six import add_metaclass
 
 import pyro
 import pyro.poutine as poutine
@@ -13,8 +9,7 @@ from pyro.poutine.util import prune_subsample_sites
 from pyro.util import check_site_shape
 
 
-@add_metaclass(ABCMeta)
-class ELBO(object):
+class ELBO(object, metaclass=ABCMeta):
     """
     :class:`ELBO` is the top-level interface for stochastic variational
     inference via optimization of the evidence lower bound.
@@ -41,9 +36,14 @@ class ELBO(object):
         :class:`pyro.infer.traceenum_elbo.TraceEnum_ELBO` is used iff there
         are enumerated sample sites.
     :param bool ignore_jit_warnings: Flag to ignore warnings from the JIT
-        tracer, when . All :class:`torch.jit.TracerWarning` will be ignored.
+        tracer. When this is True, all :class:`torch.jit.TracerWarning` will
+        be ignored. Defaults to False.
+    :param bool jit_options: Optional dict of options to pass to
+        :func:`torch.jit.trace` , e.g. ``{"check_trace": True}``.
     :param bool retain_graph: Whether to retain autograd graph during an SVI
         step. Defaults to None (False).
+    :param float tail_adaptive_beta: Exponent beta with ``-1.0 <= beta < 0.0`` for
+        use with `TraceTailAdaptive_ELBO`.
 
     References
 
@@ -61,7 +61,9 @@ class ELBO(object):
                  vectorize_particles=False,
                  strict_enumeration_warning=True,
                  ignore_jit_warnings=False,
-                 retain_graph=None):
+                 jit_options=None,
+                 retain_graph=None,
+                 tail_adaptive_beta=-1.0):
         if max_iarange_nesting is not None:
             warnings.warn("max_iarange_nesting is deprecated; use max_plate_nesting instead",
                           DeprecationWarning)
@@ -74,6 +76,8 @@ class ELBO(object):
             self.max_plate_nesting += 1
         self.strict_enumeration_warning = strict_enumeration_warning
         self.ignore_jit_warnings = ignore_jit_warnings
+        self.jit_options = jit_options
+        self.tail_adaptive_beta = tail_adaptive_beta
 
     def _guess_max_plate_nesting(self, model, guide, *args, **kwargs):
         """

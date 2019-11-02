@@ -1,5 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
 from collections import OrderedDict
 
 import torch.nn as nn
@@ -135,9 +133,9 @@ class Parameterized(nn.Module):
     def autoguide(self, name, dist_constructor):
         """
         Sets an autoguide for an existing parameter with name ``name`` (mimic
-        the behavior of module :mod:`pyro.contrib.autoguide`).
+        the behavior of module :mod:`pyro.infer.autoguide`).
 
-        ..note:: `dist_constructor` should be one of
+        .. note:: `dist_constructor` should be one of
             :class:`~pyro.distributions.Delta`,
             :class:`~pyro.distributions.Normal`, and
             :class:`~pyro.distributions.MultivariateNormal`. More distribution
@@ -202,7 +200,7 @@ class Parameterized(nn.Module):
         value from its prior. If ``mode="guide"``, the value will be drawn from
         its guide.
 
-        ..note:: This method automatically sets ``mode`` for submodules which
+        .. note:: This method automatically sets ``mode`` for submodules which
             belong to :class:`Parameterized` class.
 
         :param str mode: Either "model" or "guide".
@@ -244,7 +242,7 @@ class Parameterized(nn.Module):
 
         # otherwise, we do inference in unconstrained space and transform the value
         # back to original space
-        # TODO: move this logic to contrib.autoguide or somewhere else
+        # TODO: move this logic to infer.autoguide or somewhere else
         unconstrained_value = pyro.sample("{}_latent".format(name), guide.to_event(),
                                           infer={"is_auxiliary": True})
         transform = biject_to(self._priors[name].support)

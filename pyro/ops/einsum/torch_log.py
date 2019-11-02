@@ -1,5 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
 import torch
 
 from pyro.ops.einsum.util import Tensordot
@@ -31,6 +29,8 @@ def einsum(equation, *operands):
         for i, dim in enumerate(dims):
             if dim not in output:
                 shift = shift.max(i, keepdim=True)[0]
+        # avoid nan due to -inf - -inf
+        shift = shift.clamp(min=torch.finfo(shift.dtype).min)
         exp_operands.append((operand - shift).exp())
 
         # permute shift to match output

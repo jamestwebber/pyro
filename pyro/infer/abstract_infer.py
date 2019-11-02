@@ -1,14 +1,13 @@
-from __future__ import absolute_import, division, print_function
-
 import numbers
+import warnings
 from abc import ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict
 
 import torch
-from six import add_metaclass
 
 import pyro.poutine as poutine
 from pyro.distributions import Categorical, Empirical
+from pyro.infer.util import site_is_subsample
 from pyro.ops.stats import waic
 
 
@@ -17,7 +16,7 @@ class EmpiricalMarginal(Empirical):
     Marginal distribution over a single site (or multiple, provided they have the same
     shape) from the ``TracePosterior``'s model.
 
-    ..note:: If multiple sites are specified, they must have the same tensor shape.
+    .. note:: If multiple sites are specified, they must have the same tensor shape.
         Samples from each site will be stacked and stored within a single tensor. See
         :class:`~pyro.distributions.Empirical`. To hold the marginal distribution of sites
         having different shapes, use :class:`~pyro.infer.abstract_infer.Marginals` instead.
@@ -51,8 +50,11 @@ class EmpiricalMarginal(Empirical):
         samples_by_chain = []
         weights_by_chain = []
         for i in range(num_chains):
-            samples_by_chain.append(torch.stack(self._samples_buffer[i], dim=0))
-            weights_by_chain.append(torch.stack(self._weights_buffer[i], dim=0))
+            samples = torch.stack(self._samples_buffer[i], dim=0)
+            samples_by_chain.append(samples)
+            weights_dtype = samples.dtype if samples.dtype.is_floating_point else torch.float32
+            weights = torch.as_tensor(self._weights_buffer[i], device=samples.device, dtype=weights_dtype)
+            weights_by_chain.append(weights)
         if len(samples_by_chain) == 1:
             return samples_by_chain[0], weights_by_chain[0]
         else:
@@ -73,14 +75,10 @@ class EmpiricalMarginal(Empirical):
             in ``[0, num_chains - 1]``, and there must be equal number
             of samples per chain.
         """
-        weight_type = value.new_empty(1).float().type() if value.dtype in (torch.int32, torch.int64) \
-            else value.type()
         # Apply default weight of 1.0.
         if log_weight is None:
-            log_weight = torch.tensor(0.0).type(weight_type)
-        if isinstance(log_weight, numbers.Number):
-            log_weight = torch.tensor(log_weight).type(weight_type)
-        if self._validate_args and log_weight.dim() > 0:
+            log_weight = 0.0
+        if self._validate_args and not isinstance(log_weight, numbers.Number) and log_weight.dim() > 0:
             raise ValueError("``weight.dim() > 0``, but weight should be a scalar.")
 
         # Append to the buffer list
@@ -129,6 +127,15 @@ class Marginals(object):
                            for site in self.sites}
 
     def support(self, flatten=False):
+        """
+        Gets support of this marginal distribution.
+
+        :param bool flatten: A flag to decide if we want to flatten `batch_shape`
+            when the marginal distribution is collected from the posterior with
+            ``num_chains > 1``. Defaults to False.
+        :returns: a dict with keys are sites' names and values are sites' supports.
+        :rtype: :class:`OrderedDict`
+        """
         support = OrderedDict([(site, value.enumerate_support())
                                for site, value in self._marginals.items()])
         if self._trace_posterior.num_chains > 1 and flatten:
@@ -140,11 +147,16 @@ class Marginals(object):
 
     @property
     def empirical(self):
+        """
+        A dictionary of sites' names and their corresponding :class:`EmpiricalMarginal`
+        distribution.
+
+        :type: :class:`OrderedDict`
+        """
         return self._marginals
 
 
-@add_metaclass(ABCMeta)
-class TracePosterior(object):
+class TracePosterior(object, metaclass=ABCMeta):
     """
     Abstract TracePosterior object from which posterior inference algorithms inherit.
     When run, collects a bag of execution traces from the approximate posterior.
@@ -163,6 +175,14 @@ class TracePosterior(object):
         self._categorical = None
 
     def marginal(self, sites=None):
+        """
+        Generates the marginal distribution of this posterior.
+
+        :param list sites: optional list of sites for which we need to generate
+            the marginal distribution.
+        :returns: A :class:`Marginals` class instance.
+        :rtype: :class:`Marginals`
+        """
         return Marginals(self, sites)
 
     @abstractmethod
@@ -224,8 +244,9 @@ class TracePosterior(object):
 
         :param bool pointwise: a flag to decide if we want to get a vectorized WAIC or not. When
             ``pointwise=False``, returns the sum.
-        :returns OrderedDict: a dictionary containing values of WAIC and its effective number of
+        :returns: a dictionary containing values of WAIC and its effective number of
             parameters.
+        :rtype: :class:`OrderedDict`
         """
         if not self.exec_traces:
             return {}
@@ -246,7 +267,7 @@ class TracePosterior(object):
                                    .log_prob(trace.nodes[obs_node]["value"]))
 
         ll = torch.stack(log_likelihoods, dim=0)
-        waic_value, p_waic = waic(ll, ll.new_tensor(self.log_weights), pointwise)
+        waic_value, p_waic = waic(ll, torch.tensor(self.log_weights, device=ll.device), pointwise)
         return OrderedDict([("waic", waic_value), ("p_waic", p_waic)])
 
 
@@ -257,25 +278,65 @@ class TracePredictive(TracePosterior):
     achieved by constraining latent sites to randomly sampled parameter
     values from the model execution traces and running the model forward
     to generate traces with new response ("_RETURN") sites.
-
     :param model: arbitrary Python callable containing Pyro primitives.
-    :param TracePosterior posterior: trace posterior instance holding
-        samples from the model's approximate posterior.
+    :param TracePosterior posterior: trace posterior instance holding samples from the model's approximate posterior.
     :param int num_samples: number of samples to generate.
+    :param keep_sites: The sites which should be sampled from posterior distribution (default: all)
     """
-    def __init__(self, model, posterior, num_samples):
+    def __init__(self, model, posterior, num_samples, keep_sites=None):
         self.model = model
         self.posterior = posterior
         self.num_samples = num_samples
+        self.keep_sites = keep_sites
         super(TracePredictive, self).__init__()
+        warnings.warn('This class will be removed in the next release. Use the '
+                      '`pyro.infer.Predictive` class instead.', DeprecationWarning)
 
     def _traces(self, *args, **kwargs):
         if not self.posterior.exec_traces:
             self.posterior.run(*args, **kwargs)
+        data_trace = poutine.trace(self.model).get_trace(*args, **kwargs)
         for _ in range(self.num_samples):
-            model_trace = self.posterior()
-            replayed_trace = poutine.trace(poutine.replay(self.model, model_trace)).get_trace(*args, **kwargs)
-            yield (replayed_trace, 0., 0)
+            model_trace = self.posterior().copy()
+            self._remove_dropped_nodes(model_trace)
+            self._adjust_to_data(model_trace, data_trace)
+            resampled_trace = poutine.trace(poutine.replay(self.model, model_trace)).get_trace(*args, **kwargs)
+            yield (resampled_trace, 0., 0)
+
+    def _remove_dropped_nodes(self, trace):
+        if self.keep_sites is None:
+            return
+        for name, site in list(trace.nodes.items()):
+            if name not in self.keep_sites:
+                trace.remove_node(name)
+                continue
+
+    def _adjust_to_data(self, trace, data_trace):
+        subsampled_idxs = dict()
+        for name, site in trace.iter_stochastic_nodes():
+            # Adjust subsample sites
+            if site_is_subsample(site):
+                site["fn"] = data_trace.nodes[name]["fn"]
+                site["value"] = data_trace.nodes[name]["value"]
+            # Adjust sites under conditionally independent stacks
+            orig_cis_stack = site["cond_indep_stack"]
+            site["cond_indep_stack"] = data_trace.nodes[name]["cond_indep_stack"]
+            assert len(orig_cis_stack) == len(site["cond_indep_stack"])
+            site["fn"] = data_trace.nodes[name]["fn"]
+            for ocis, cis in zip(orig_cis_stack, site["cond_indep_stack"]):
+                # Select random sub-indices to replay values under conditionally independent stacks.
+                # Otherwise, we assume there is an dependence of indexes between training data
+                # and prediction data.
+                assert ocis.name == cis.name
+                assert not site_is_subsample(site)
+                batch_dim = cis.dim - site["fn"].event_dim
+                subsampled_idxs[cis.name] = subsampled_idxs.get(cis.name,
+                                                                torch.randint(0, ocis.size, (cis.size,),
+                                                                              device=site["value"].device))
+                site["value"] = site["value"].index_select(batch_dim, subsampled_idxs[cis.name])
 
     def marginal(self, sites=None):
-        return self.posterior.marginal(sites)
+        """
+        Gets marginal distribution for this predictive posterior distribution.
+        """
+        return Marginals(self, sites)

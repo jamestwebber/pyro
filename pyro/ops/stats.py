@@ -1,8 +1,7 @@
-from __future__ import absolute_import, division, print_function
-
 import numbers
 
 import torch
+import math
 
 
 def _compute_chain_variance_stats(input):
@@ -16,6 +15,10 @@ def _compute_chain_variance_stats(input):
         chain_mean = input.mean(dim=0)
         var_between = chain_mean.var(dim=0)
         var_estimator = var_estimator + var_between
+    else:
+        # to make rho_k is the same as autocorrelation when num_chains == 1
+        # in computing effective_sample_size
+        var_within = var_estimator
     return var_within, var_estimator
 
 
@@ -114,20 +117,21 @@ def autocorrelation(input, dim=0):
 
     # centering and padding x
     centered_signal = input - input.mean(dim=-1, keepdim=True)
-    pad = input.new_zeros(input.shape[:-1] + (M2 - N,))
+    pad = torch.zeros(input.shape[:-1] + (M2 - N,), dtype=input.dtype, device=input.device)
     centered_signal = torch.cat([centered_signal, pad], dim=-1)
 
     # Fourier transform
     freqvec = torch.rfft(centered_signal, signal_ndim=1, onesided=False)
     # take square of magnitude of freqvec (or freqvec x freqvec*)
     freqvec_gram = freqvec.pow(2).sum(-1, keepdim=True)
-    freqvec_gram = torch.cat([freqvec_gram, input.new_zeros(freqvec_gram.shape)], dim=-1)
+    freqvec_gram = torch.cat([freqvec_gram, torch.zeros(freqvec_gram.shape, dtype=input.dtype,
+                                                        device=input.device)], dim=-1)
     # inverse Fourier transform
     autocorr = torch.irfft(freqvec_gram, signal_ndim=1, onesided=False)
 
     # truncate and normalize the result, then transpose back to original shape
     autocorr = autocorr[..., :N]
-    autocorr = autocorr / input.new_tensor(range(N, 0, -1))
+    autocorr = autocorr / torch.tensor(range(N, 0, -1), dtype=input.dtype, device=input.device)
     autocorr = autocorr / autocorr[..., :1]
     return autocorr.transpose(dim, -1)
 
@@ -153,7 +157,8 @@ def _cummin(input):
     # FIXME: is there a better trick to find accumulate min of a sequence?
     N = input.size(0)
     input_tril = input.unsqueeze(0).repeat((N,) + (1,) * input.dim())
-    triu_mask = input.new_ones(N, N).triu(diagonal=1).reshape((N, N) + (1,) * (input.dim() - 1))
+    triu_mask = (torch.ones(N, N, dtype=input.dtype, device=input.device)
+                 .triu(diagonal=1).reshape((N, N) + (1,) * (input.dim() - 1)))
     triu_mask = triu_mask.expand((N, N) + input.shape[1:]) > 0.5
     input_tril.masked_fill_(triu_mask, input.max())
     return input_tril.min(dim=1)[0]
@@ -164,8 +169,10 @@ def effective_sample_size(input, chain_dim=0, sample_dim=1):
     Computes effective sample size of input.
 
     Reference:
+
     [1] `Introduction to Markov Chain Monte Carlo`,
         Charles J. Geyer
+
     [2] `Stan Reference Manual version 2.18`,
         Stan Development Team
 
@@ -226,7 +233,7 @@ def resample(input, num_samples, dim=0, replacement=False):
     :param int dim: dimension to draw from ``input``.
     :returns torch.Tensor: samples drawn randomly from ``input``.
     """
-    weights = input.new_ones(input.size(dim))
+    weights = torch.ones(input.size(dim), dtype=input.dtype, device=input.device)
     indices = torch.multinomial(weights, num_samples, replacement)
     return input.index_select(dim, indices)
 
@@ -242,7 +249,7 @@ def quantile(input, probs, dim=0):
     :returns torch.Tensor: quantiles of ``input`` at ``probs``.
     """
     if isinstance(probs, (numbers.Number, list, tuple)):
-        probs = input.new_tensor(probs)
+        probs = torch.tensor(probs, dtype=input.dtype, device=input.device)
     sorted_input = input.sort(dim)[0]
     max_index = input.size(dim) - 1
     indices = probs * max_index
@@ -287,9 +294,9 @@ def hpdi(input, prob, dim=0):
     mass = input.size(dim)
     index_length = int(prob * mass)
     intervals_left = sorted_input.index_select(
-        dim, input.new_tensor(range(mass - index_length), dtype=torch.long))
+        dim, torch.tensor(range(mass - index_length), dtype=torch.long, device=input.device))
     intervals_right = sorted_input.index_select(
-        dim, input.new_tensor(range(index_length, mass), dtype=torch.long))
+        dim, torch.tensor(range(index_length, mass), dtype=torch.long, device=input.device))
     intervals_length = intervals_right - intervals_left
     index_start = intervals_length.argmin(dim)
     indices = torch.stack([index_start, index_start + index_length], dim)
@@ -326,7 +333,8 @@ def waic(input, log_weights=None, pointwise=False, dim=0):
     :param int dim: the sample dimension of ``input``.
     :returns tuple: tuple of WAIC and effective number of parameters.
     """
-    log_weights = input.new_zeros(input.size(dim)) if log_weights is None else log_weights
+    if log_weights is None:
+        log_weights = torch.zeros(input.size(dim), dtype=input.dtype, device=input.device)
 
     # computes log pointwise predictive density: formula (3) of [1]
     dim = input.dim() + dim if dim < 0 else dim
@@ -340,3 +348,93 @@ def waic(input, log_weights=None, pointwise=False, dim=0):
     elpd = lpd - p_waic
     waic = -2 * elpd
     return (waic, p_waic) if pointwise else (waic.sum(), p_waic.sum())
+
+
+def fit_generalized_pareto(X):
+    """
+    Given a dataset X assumed to be drawn from the Generalized Pareto
+    Distribution, estimate the distributional parameters k, sigma using a
+    variant of the technique described in reference [1], as described in
+    reference [2].
+
+    References
+    [1] 'A new and efficient estimation method for the generalized Pareto distribution.'
+    Zhang, J. and Stephens, M.A. (2009).
+    [2] 'Pareto Smoothed Importance Sampling.'
+    Aki Vehtari, Andrew Gelman, Jonah Gabry
+
+    :param torch.Tensor: the input data X
+    :returns tuple: tuple of floats (k, sigma) corresponding to the fit parameters
+    """
+    if not isinstance(X, torch.Tensor) or X.dim() != 1:
+        raise ValueError("Input X must be a 1-dimensional torch tensor")
+
+    X = X.double()
+    X = torch.sort(X, descending=False)[0]
+
+    N = X.size(0)
+    M = 30 + int(math.sqrt(N))
+
+    # b = k / sigma
+    bs = 1.0 - math.sqrt(M) / (torch.arange(1, M + 1, dtype=torch.double) - 0.5).sqrt()
+    bs /= 3.0 * X[int(N/4 - 0.5)]
+    bs += 1 / X[-1]
+
+    ks = torch.log1p(-bs.unsqueeze(-1) * X).mean(-1)
+    Ls = N * (torch.log(-bs / ks) - (ks + 1.0))
+
+    weights = torch.exp(Ls - Ls.unsqueeze(-1))
+    weights = 1.0 / weights.sum(-1)
+
+    not_small_weights = weights > 1.0e-30
+    weights = weights[not_small_weights]
+    bs = bs[not_small_weights]
+    weights /= weights.sum()
+
+    b = (bs * weights).sum().item()
+    k = torch.log1p(-b * X).mean().item()
+    sigma = -k / b
+    k = k * N / (N + 10.0) + 5.0 / (N + 10.0)
+
+    return k, sigma
+
+
+def crps_empirical(pred, truth):
+    """
+    Computes negative Continuous Ranked Probability Score CRPS* [1] between a
+    set of samples ``pred`` and true data ``truth``. This uses an ``n log(n)``
+    time algorithm to compute a quantity equal that would naively have
+    complexity quadratic in the number of samples ``n``::
+
+        CRPS* = E|pred - truth| - 1/2 E|pred - pred'|
+              = (pred - truth).abs().mean(0)
+              - (pred - pred.unsqueeze(1)).abs().mean([0, 1]) / 2
+
+    Note that for a single sample this reduces to absolute error.
+
+    References
+    [1] `Strictly Proper Scoring Rules, Prediction, and Estimation`
+    Tilmann Gneiting, Adrian E. Raftery (2007)
+    https://www.stat.washington.edu/raftery/Research/PDF/Gneiting2007jasa.pdf
+
+    :param torch.Tensor pred: A set of sample predictions batched on rightmost dim.
+        This should have shape ``(num_samples,) + truth.shape``.
+    :param torch.Tensor truth: A tensor of true observations.
+    :return: A tensor of shape ``truth.shape``.
+    :rtype: torch.Tensor
+    """
+    if pred.dim() != 1 + truth.dim() or pred.shape[1:] != truth.shape:
+        raise ValueError("Expected pred to have one extra sample dim on left. "
+                         "Actual shapes: {} versus {}".format(pred.shape, truth.shape))
+    opts = dict(device=pred.device, dtype=pred.dtype)
+    num_samples = pred.size(0)
+    if num_samples == 1:
+        return (pred[0] - truth).abs()
+
+    pred = pred.sort(dim=0).values
+    diff = pred[1:] - pred[:-1]
+    weight = (torch.arange(1, num_samples, **opts) *
+              torch.arange(num_samples - 1, 0, -1, **opts))
+    weight = weight.reshape(weight.shape + (1,) * truth.dim())
+
+    return (pred - truth).abs().mean(0) - (diff * weight).sum(0) / num_samples**2

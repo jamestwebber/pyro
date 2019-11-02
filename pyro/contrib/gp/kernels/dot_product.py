@@ -1,5 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
 import torch
 from torch.distributions import constraints
 from torch.nn import Parameter
@@ -47,7 +45,7 @@ class Linear(DotProduct):
 
     .. note:: Here we implement the homogeneous version. To use the inhomogeneous
         version, consider using :class:`Polynomial` kernel with ``degree=1`` or making
-        a :class:`.Sum` with a :class:`.Bias` kernel.
+        a :class:`.Sum` with a :class:`.Constant` kernel.
     """
 
     def __init__(self, input_dim, variance=None, active_dims=None):

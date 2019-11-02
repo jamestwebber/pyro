@@ -1,5 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
 import logging
 import warnings
 
@@ -12,6 +10,7 @@ import pyro
 import pyro.distributions as dist
 import pyro.ops.jit
 import pyro.poutine as poutine
+from pyro.distributions.util import scale_and_mask
 from pyro.infer import (SVI, JitTrace_ELBO, JitTraceEnum_ELBO, JitTraceGraph_ELBO, JitTraceMeanField_ELBO, Trace_ELBO,
                         TraceEnum_ELBO, TraceGraph_ELBO, TraceMeanField_ELBO, infer_discrete)
 from pyro.optim import Adam
@@ -42,13 +41,13 @@ def test_simple():
     logger.debug('Compiling f')
     f = torch.jit.trace(f, (y,), check_trace=False)
     logger.debug('Calling f(y)')
-    assert_equal(f(y), y.new_tensor([2., 2.]))
+    assert_equal(f(y), torch.tensor([2., 2.]))
     logger.debug('Calling f(y)')
-    assert_equal(f(y), y.new_tensor([2., 2.]))
+    assert_equal(f(y), torch.tensor([2., 2.]))
     logger.debug('Calling f(torch.zeros(2))')
-    assert_equal(f(torch.zeros(2)), y.new_tensor([1., 1.]))
+    assert_equal(f(torch.zeros(2)), torch.tensor([1., 1.]))
     logger.debug('Calling f(torch.zeros(5))')
-    assert_equal(f(torch.ones(5)), y.new_tensor([2., 2., 2., 2., 2.]))
+    assert_equal(f(torch.ones(5)), torch.tensor([2., 2., 2., 2., 2.]))
 
 
 def test_multi_output():
@@ -64,13 +63,13 @@ def test_multi_output():
     logger.debug('Compiling f')
     f = torch.jit.trace(f, (y,), check_trace=False)
     logger.debug('Calling f(y)')
-    assert_equal(f(y)[1], y.new_tensor([2., 2.]))
+    assert_equal(f(y)[1], torch.tensor([2., 2.]))
     logger.debug('Calling f(y)')
-    assert_equal(f(y)[1], y.new_tensor([2., 2.]))
+    assert_equal(f(y)[1], torch.tensor([2., 2.]))
     logger.debug('Calling f(torch.zeros(2))')
-    assert_equal(f(torch.zeros(2))[1], y.new_tensor([1., 1.]))
+    assert_equal(f(torch.zeros(2))[1], torch.tensor([1., 1.]))
     logger.debug('Calling f(torch.zeros(5))')
-    assert_equal(f(torch.ones(5))[1], y.new_tensor([2., 2., 2., 2., 2.]))
+    assert_equal(f(torch.ones(5))[1], torch.tensor([2., 2., 2., 2., 2.]))
 
 
 def test_backward():
@@ -127,6 +126,22 @@ def test_grad_expand():
     f(torch.zeros(2, requires_grad=True), torch.zeros(1, requires_grad=True))
 
 
+def test_scale_and_mask():
+    def f(tensor, scale, mask): return scale_and_mask(tensor, scale=scale, mask=mask)
+
+    x = torch.tensor([-float('inf'), -1., 0., 1., float('inf')])
+    y = x / x.unsqueeze(-1)
+    mask = y == y
+    scale = torch.ones(y.shape)
+    jit_f = torch.jit.trace(f, (y, scale, mask))
+    assert_equal(jit_f(y, scale, mask), f(y, scale, mask))
+
+    mask = torch.tensor([True])
+    y = torch.tensor([1.5, 2.5, 3.5, 4.5, 5.5, 6.5])
+    scale = torch.ones(y.shape)
+    assert_equal(jit_f(y, scale, mask), f(y, scale, mask))
+
+
 def test_masked_fill():
 
     def f(y, mask):
@@ -147,7 +162,7 @@ def test_masked_fill():
 def test_scatter():
 
     def make_one_hot(x, i):
-        return x.new_zeros(x.shape).scatter(-1, i.unsqueeze(-1), 1.0)
+        return torch.zeros_like(x).scatter(-1, i.unsqueeze(-1), 1.0)
 
     x = torch.randn(5, 4, 3)
     i = torch.randint(0, 3, torch.Size((5, 4)))
@@ -158,7 +173,7 @@ def test_scatter():
 def test_scatter_workaround():
 
     def make_one_hot_expected(x, i):
-        return x.new_zeros(x.shape).scatter(-1, i.unsqueeze(-1), 1.0)
+        return torch.zeros_like(x).scatter(-1, i.unsqueeze(-1), 1.0)
 
     def make_one_hot_actual(x, i):
         eye = torch.eye(x.shape[-1], dtype=x.dtype, device=x.device)

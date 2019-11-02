@@ -1,15 +1,21 @@
 """
-This example demonstrates how to marginalize out discrete assignment variables
-in a Pyro model.
+This example implements amortized Latent Dirichlet Allocation [1],
+demonstrating how to marginalize out discrete assignment variables in a Pyro
+model. This model and inference algorithm treat documents as vectors of
+categorical variables (vectors of word ids), and collapses word-topic
+assignments using Pyro's enumeration. We use PyTorch's reparametrized Gamma and
+Dirichlet distributions [2], avoiding the need for Laplace approximations as in
+[1]. Following [1] we use the Adam optimizer and clip gradients.
 
-Our example model is Latent Dirichlet Allocation. While the model in this
-example does work, it is not the recommended way of coding up LDA in Pyro.
-Whereas the model in this example treats documents as vectors of categorical
-variables (vectors of word ids), it is usually more efficient to treat
-documents as bags of words (histograms of word counts).
+**References:**
+
+[1] Akash Srivastava, Charles Sutton. ICLR 2017.
+    "Autoencoding Variational Inference for Topic Models"
+    https://arxiv.org/pdf/1703.01488.pdf
+[2] Martin Jankowiak, Fritz Obermeyer. ICML 2018.
+    "Pathwise gradients beyond the reparametrization trick"
+    https://arxiv.org/pdf/1806.01851.pdf
 """
-from __future__ import absolute_import, division, print_function
-
 import argparse
 import functools
 import logging
@@ -21,7 +27,7 @@ from torch.distributions import constraints
 import pyro
 import pyro.distributions as dist
 from pyro.infer import SVI, JitTraceEnum_ELBO, TraceEnum_ELBO
-from pyro.optim import Adam
+from pyro.optim import ClippedAdam
 
 logging.basicConfig(format='%(relativeCreated) 9d %(message)s', level=logging.INFO)
 
@@ -71,6 +77,7 @@ def make_predictor(args):
         layer.bias.data.normal_(0, 0.001)
         layers.append(layer)
         layers.append(nn.Sigmoid())
+    layers.append(nn.Softmax(dim=-1))
     return nn.Sequential(*layers)
 
 
@@ -78,12 +85,12 @@ def parametrized_guide(predictor, data, args, batch_size=None):
     # Use a conjugate guide for global variables.
     topic_weights_posterior = pyro.param(
             "topic_weights_posterior",
-            lambda: torch.ones(args.num_topics) / args.num_topics,
+            lambda: torch.ones(args.num_topics),
             constraint=constraints.positive)
     topic_words_posterior = pyro.param(
             "topic_words_posterior",
-            lambda: torch.ones(args.num_topics, args.num_words) / args.num_words,
-            constraint=constraints.positive)
+            lambda: torch.ones(args.num_topics, args.num_words),
+            constraint=constraints.greater_than(0.5))
     with pyro.plate("topics", args.num_topics):
         pyro.sample("topic_weights", dist.Gamma(topic_weights_posterior, 1.))
         pyro.sample("topic_words", dist.Dirichlet(topic_words_posterior))
@@ -91,13 +98,11 @@ def parametrized_guide(predictor, data, args, batch_size=None):
     # Use an amortized guide for local variables.
     pyro.module("predictor", predictor)
     with pyro.plate("documents", args.num_docs, batch_size) as ind:
+        data = data[:, ind]
         # The neural network will operate on histograms rather than word
         # index vectors, so we'll convert the raw data to a histogram.
-        if torch._C._get_tracing_state():
-            counts = torch.eye(1024)[data[:, ind]].sum(0).t()
-        else:
-            counts = torch.zeros(args.num_words, ind.size(0))
-            counts.scatter_add_(0, data[:, ind], torch.tensor(1.).expand(counts.shape))
+        counts = (torch.zeros(args.num_words, ind.size(0))
+                       .scatter_add(0, data, torch.ones(data.shape)))
         doc_topics = predictor(counts.transpose(0, 1))
         pyro.sample("doc_topics", dist.Delta(doc_topics, event_dim=1))
 
@@ -105,6 +110,9 @@ def parametrized_guide(predictor, data, args, batch_size=None):
 def main(args):
     logging.info('Generating data')
     pyro.set_rng_seed(0)
+    pyro.clear_param_store()
+    pyro.enable_validation(__debug__)
+
     # We can generate synthetic data directly by calling the model.
     true_topic_weights, true_topic_words, data = model(args=args)
 
@@ -115,7 +123,7 @@ def main(args):
     guide = functools.partial(parametrized_guide, predictor)
     Elbo = JitTraceEnum_ELBO if args.jit else TraceEnum_ELBO
     elbo = Elbo(max_plate_nesting=2)
-    optim = Adam({'lr': args.learning_rate})
+    optim = ClippedAdam({'lr': args.learning_rate})
     svi = SVI(model, guide, optim, elbo)
     logging.info('Step\tLoss')
     for step in range(args.num_steps):
@@ -127,7 +135,7 @@ def main(args):
 
 
 if __name__ == '__main__':
-    assert pyro.__version__.startswith('0.3.0')
+    assert pyro.__version__.startswith('0.5.1')
     parser = argparse.ArgumentParser(description="Amortized Latent Dirichlet Allocation")
     parser.add_argument("-t", "--num-topics", default=8, type=int)
     parser.add_argument("-w", "--num-words", default=1024, type=int)
@@ -135,7 +143,7 @@ if __name__ == '__main__':
     parser.add_argument("-wd", "--num-words-per-doc", default=64, type=int)
     parser.add_argument("-n", "--num-steps", default=1000, type=int)
     parser.add_argument("-l", "--layer-sizes", default="100-100")
-    parser.add_argument("-lr", "--learning-rate", default=0.001, type=float)
+    parser.add_argument("-lr", "--learning-rate", default=0.01, type=float)
     parser.add_argument("-b", "--batch-size", default=32, type=int)
     parser.add_argument('--jit', action='store_true')
     args = parser.parse_args()

@@ -19,10 +19,25 @@ Utilities for HMC
     :show-inheritance:
     :member-order: bysource
 
+.. automodule:: pyro.ops.welford
+    :members:
+    :undoc-members:
+    :show-inheritance:
+    :member-order: bysource
+
 Newton Optimizers
 -----------------
 
 .. automodule:: pyro.ops.newton
+    :members:
+    :undoc-members:
+    :show-inheritance:
+    :member-order: bysource
+
+Tensor Indexing
+---------------
+
+.. automodule:: pyro.ops.indexing
     :members:
     :undoc-members:
     :show-inheritance:
@@ -37,4 +52,35 @@ Tensor Contraction
     :show-inheritance:
     :member-order: bysource
 
+.. autofunction:: pyro.ops.contract.einsum
+
 .. autofunction:: pyro.ops.contract.ubersum
+
+Gaussian Contraction
+--------------------
+
+.. automodule:: pyro.ops.gaussian
+    :members:
+    :undoc-members:
+    :show-inheritance:
+    :member-order: bysource
+    :special-members: __add__,__getitem__
+
+Statistical Utilities
+---------------------
+
+.. automodule:: pyro.ops.stats
+    :members:
+    :undoc-members:
+    :show-inheritance:
+    :member-order: bysource
+
+ 
+State Space Model and GP Utilities
+----------------------------------
+
+.. automodule:: pyro.ops.ssm_gp
+    :members:
+    :undoc-members:
+    :show-inheritance:
+    :member-order: bysource

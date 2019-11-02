@@ -1,5 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
 import math
 
 import torch
@@ -91,7 +89,9 @@ def gather(value, index, dim):
     value, index = broadcast_all(value, index)
     dims = value._pyro_dims.replace(dim, '')
     pos = value._pyro_dims.index(dim)
-    index = index.index_select(pos, index.new_tensor([0]))
+    with ignore_jit_warnings():
+        zero = torch.zeros(1, dtype=torch.long, device=index.device)
+    index = index.index_select(pos, zero)
     value = value.gather(pos, index).squeeze(pos)
     value._pyro_dims = dims
     assert value.dim() == len(value._pyro_dims)
@@ -124,7 +124,7 @@ def scale_and_mask(tensor, scale=1.0, mask=None):
     :param scale: a positive scale
     :type scale: torch.Tensor or number
     :param mask: an optional packed tensor mask
-    :type mask: torch.ByteTensor or None
+    :type mask: torch.BoolTensor or None
     """
     if isinstance(scale, torch.Tensor) and scale.dim():
         raise NotImplementedError('non-scalar scale is not supported')
@@ -135,8 +135,7 @@ def scale_and_mask(tensor, scale=1.0, mask=None):
         result._pyro_dims = tensor._pyro_dims
         return result
     tensor, mask = broadcast_all(tensor, mask)
-    result = tensor * scale  # triggers a copy, avoiding in-place op errors
-    result.masked_fill_(~mask, 0.)
+    result = torch.where(mask, tensor, tensor.new_zeros(()))
     result._pyro_dims = tensor._pyro_dims
     return result
 

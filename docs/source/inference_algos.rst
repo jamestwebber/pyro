@@ -39,6 +39,12 @@ ELBO
     :show-inheritance:
     :member-order: bysource
 
+.. automodule:: pyro.infer.trace_tail_adaptive_elbo
+    :members:
+    :undoc-members:
+    :show-inheritance:
+    :member-order: bysource
+
 .. automodule:: pyro.infer.renyi_elbo
     :members:
     :undoc-members:
@@ -53,15 +59,37 @@ Importance
     :undoc-members:
     :show-inheritance:
 
+Sequential Monte Carlo
+----------------------
+
+.. automodule:: pyro.infer.smcfilter
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+Stein Methods
+----------------------
+
+.. automodule:: pyro.infer.svgd
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 Discrete Inference
 ------------------
 
 .. automodule:: pyro.infer.discrete
     :members:
     :show-inheritance:
+    :member-order: bysource
 
 Inference Utilities
 -------------------
+
+.. automodule:: pyro.infer.predictive
+    :members:
+    :undoc-members:
+    :show-inheritance:
 
 .. automodule:: pyro.infer.abstract_infer
     :members:

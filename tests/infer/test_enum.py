@@ -1,5 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
 import logging
 import math
 import os
@@ -18,8 +16,11 @@ import pyro.poutine as poutine
 from pyro.distributions.testing.rejection_gamma import ShapeAugmentedGamma
 from pyro.infer import SVI, config_enumerate
 from pyro.infer.enum import iter_discrete_traces
+from pyro.infer.importance import vectorized_importance_weights
+from pyro.infer.trace_elbo import Trace_ELBO
 from pyro.infer.traceenum_elbo import TraceEnum_ELBO
 from pyro.infer.util import LAST_CACHE_SIZE
+from pyro.ops.indexing import Vindex
 from pyro.util import torch_isnan
 from tests.common import assert_equal, skipif_param
 
@@ -1697,7 +1698,6 @@ def test_elbo_enumerate_plate_5():
                torch.tensor([0.8, 0.2]),
                constraint=constraints.simplex)
     data = torch.tensor([1, 2])
-    c_ind = torch.arange(3, dtype=torch.long)
 
     @config_enumerate
     def model_plate():
@@ -1707,8 +1707,7 @@ def test_elbo_enumerate_plate_5():
         a = pyro.sample("a", dist.Categorical(probs_a))
         with pyro.plate("b_axis", 2):
             b = pyro.sample("b", dist.Categorical(probs_b))
-            pyro.sample("c",
-                        dist.Categorical(probs_c[a.unsqueeze(-1), b.unsqueeze(-1), c_ind]),
+            pyro.sample("c", dist.Categorical(Vindex(probs_c)[a, b]),
                         obs=data)
 
     @config_enumerate
@@ -1726,7 +1725,7 @@ def test_elbo_enumerate_plate_5():
         for i in pyro.plate("b_axis", 2):
             b = pyro.sample("b_{}".format(i), dist.Categorical(probs_b))
             pyro.sample("c_{}".format(i),
-                        dist.Categorical(probs_c[a.unsqueeze(-1), b.unsqueeze(-1), c_ind]),
+                        dist.Categorical(Vindex(probs_c)[a, b]),
                         obs=data[i])
 
     @config_enumerate
@@ -1767,7 +1766,6 @@ def test_elbo_enumerate_plate_6(enumerate1):
                torch.tensor([0.8, 0.2]),
                constraint=constraints.simplex)
     data = torch.tensor([1, 2])
-    c_ind = torch.arange(3, dtype=torch.long)
 
     @config_enumerate
     def model_plate():
@@ -1777,8 +1775,7 @@ def test_elbo_enumerate_plate_6(enumerate1):
         a = pyro.sample("a", dist.Categorical(probs_a))
         b = pyro.sample("b", dist.Categorical(probs_b))
         with pyro.plate("b_axis", 2):
-            pyro.sample("c",
-                        dist.Categorical(probs_c[a.unsqueeze(-1), b.unsqueeze(-1), c_ind]),
+            pyro.sample("c", dist.Categorical(Vindex(probs_c)[a, b]),
                         obs=data)
 
     @config_enumerate
@@ -1790,7 +1787,7 @@ def test_elbo_enumerate_plate_6(enumerate1):
         b = pyro.sample("b", dist.Categorical(probs_b))
         for i in pyro.plate("b_axis", 2):
             pyro.sample("c_{}".format(i),
-                        dist.Categorical(probs_c[a.unsqueeze(-1), b.unsqueeze(-1), c_ind]),
+                        dist.Categorical(Vindex(probs_c)[a, b]),
                         obs=data[i])
 
     @config_enumerate(default=enumerate1)
@@ -1836,7 +1833,6 @@ def test_elbo_enumerate_plate_7(scale):
     pyro.param("guide_probs_c",
                torch.tensor([[0., 1.], [1., 0.]]),  # deterministic
                constraint=constraints.simplex)
-    d_ind = torch.arange(2, dtype=torch.long)
 
     @poutine.scale(scale=scale)
     def auto_model(data):
@@ -1850,8 +1846,7 @@ def test_elbo_enumerate_plate_7(scale):
                         infer={"enumerate": "parallel"})
         with pyro.plate("data", 2):
             c = pyro.sample("c", dist.Categorical(probs_c[a]))
-            d = pyro.sample("d",
-                            dist.Categorical(probs_d[b.unsqueeze(-1), c.unsqueeze(-1), d_ind]),
+            d = pyro.sample("d", dist.Categorical(Vindex(probs_d)[b, c]),
                             infer={"enumerate": "parallel"})
             pyro.sample("obs", dist.Categorical(probs_e[d]), obs=data)
 
@@ -1877,7 +1872,7 @@ def test_elbo_enumerate_plate_7(scale):
         for i in pyro.plate("data", 2):
             c = pyro.sample("c_{}".format(i), dist.Categorical(probs_c[a]))
             d = pyro.sample("d_{}".format(i),
-                            dist.Categorical(probs_d[b.unsqueeze(-1), c.unsqueeze(-1), d_ind]),
+                            dist.Categorical(Vindex(probs_d)[b, c]),
                             infer={"enumerate": "parallel"})
             pyro.sample("obs_{}".format(i), dist.Categorical(probs_e[d]), obs=data[i])
 
@@ -2145,7 +2140,6 @@ def test_elbo_enumerate_plates_5(scale):
                              [[0.2, 0.8], [0.1, 0.9]]]),
                constraint=constraints.simplex)
     data = torch.tensor([[0, 1], [0, 0]])
-    c_ind = torch.arange(2, dtype=torch.long)
 
     @config_enumerate
     @poutine.scale(scale=scale)
@@ -2157,8 +2151,7 @@ def test_elbo_enumerate_plates_5(scale):
         with pyro.plate("outer", 2):
             b = pyro.sample("b", dist.Categorical(probs_b[a]))
             with pyro.plate("inner", 2):
-                pyro.sample("c",
-                            dist.Categorical(probs_c[a.unsqueeze(-1), b.unsqueeze(-1), c_ind]),
+                pyro.sample("c", dist.Categorical(Vindex(probs_c)[a, b]),
                             obs=data)
 
     @config_enumerate
@@ -2173,7 +2166,7 @@ def test_elbo_enumerate_plates_5(scale):
             b = pyro.sample("b_{}".format(i), dist.Categorical(probs_b[a]))
             for j in inner:
                 pyro.sample("c_{}_{}".format(i, j),
-                            dist.Categorical(probs_c[a.unsqueeze(-1), b.unsqueeze(-1), c_ind]),
+                            dist.Categorical(Vindex(probs_c)[a, b]),
                             obs=data[i, j])
 
     def guide():
@@ -2212,7 +2205,6 @@ def test_elbo_enumerate_plates_6(scale):
     pyro.param("probs_d",
                torch.tensor([[[0.4, 0.6], [0.3, 0.7]], [[0.3, 0.7], [0.2, 0.8]]]),
                constraint=constraints.simplex)
-    d_ind = torch.arange(2, dtype=torch.long)
 
     @config_enumerate
     @poutine.scale(scale=scale)
@@ -2229,7 +2221,7 @@ def test_elbo_enumerate_plates_6(scale):
         for i in b_axis:
             for j in c_axis:
                 pyro.sample("d_{}_{}".format(i, j),
-                            dist.Categorical(probs_d[b[i].unsqueeze(-1), c[j].unsqueeze(-1), d_ind]),
+                            dist.Categorical(Vindex(probs_d)[b[i], c[j]]),
                             obs=data[i, j])
 
     @config_enumerate
@@ -2248,7 +2240,7 @@ def test_elbo_enumerate_plates_6(scale):
         for i in b_axis:
             with c_axis:
                 pyro.sample("d_{}".format(i),
-                            dist.Categorical(probs_d[b[i].unsqueeze(-1), c.unsqueeze(-1), d_ind]),
+                            dist.Categorical(Vindex(probs_d)[b[i], c]),
                             obs=data[i])
 
     @config_enumerate
@@ -2267,7 +2259,7 @@ def test_elbo_enumerate_plates_6(scale):
         with b_axis:
             for j in c_axis:
                 pyro.sample("d_{}".format(j),
-                            dist.Categorical(probs_d[b.unsqueeze(-1), c[j].unsqueeze(-1), d_ind]),
+                            dist.Categorical(Vindex(probs_d)[b, c[j]]),
                             obs=data[:, j])
 
     @config_enumerate
@@ -2286,7 +2278,7 @@ def test_elbo_enumerate_plates_6(scale):
             c = pyro.sample("c", dist.Categorical(probs_c[a]))
         with b_axis, c_axis:
             pyro.sample("d",
-                        dist.Categorical(probs_d[b.unsqueeze(-1), c.unsqueeze(-1), d_ind]),
+                        dist.Categorical(Vindex(probs_d)[b, c]),
                         obs=data)
 
     def guide(data):
@@ -2465,7 +2457,6 @@ def test_elbo_enumerate_plates_8(model_scale, guide_scale, inner_vectorized, out
                torch.tensor([0.8, 0.2]),
                constraint=constraints.simplex)
     data = torch.tensor([[0, 1], [0, 2]])
-    c_ind = torch.arange(3, dtype=torch.long)
 
     @config_enumerate
     @poutine.scale(scale=model_scale)
@@ -2478,7 +2469,7 @@ def test_elbo_enumerate_plates_8(model_scale, guide_scale, inner_vectorized, out
             b = pyro.sample("b", dist.Categorical(probs_b))
             with pyro.plate("inner", 2):
                 pyro.sample("c",
-                            dist.Categorical(probs_c[a.unsqueeze(-1), b.unsqueeze(-1), c_ind]),
+                            dist.Categorical(Vindex(probs_c)[a, b]),
                             obs=data)
 
     @config_enumerate
@@ -2493,7 +2484,7 @@ def test_elbo_enumerate_plates_8(model_scale, guide_scale, inner_vectorized, out
             b = pyro.sample("b_{}".format(i), dist.Categorical(probs_b))
             with inner:
                 pyro.sample("c_{}".format(i),
-                            dist.Categorical(probs_c[a.unsqueeze(-1), b.unsqueeze(-1), c_ind]),
+                            dist.Categorical(Vindex(probs_c)[a, b]),
                             obs=data[:, i])
 
     @config_enumerate
@@ -2507,7 +2498,7 @@ def test_elbo_enumerate_plates_8(model_scale, guide_scale, inner_vectorized, out
             b = pyro.sample("b", dist.Categorical(probs_b))
             for j in pyro.plate("inner", 2):
                 pyro.sample("c_{}".format(j),
-                            dist.Categorical(probs_c[a.unsqueeze(-1), b.unsqueeze(-1), c_ind]),
+                            dist.Categorical(Vindex(probs_c)[a, b]),
                             obs=data[j])
 
     @config_enumerate
@@ -2522,7 +2513,7 @@ def test_elbo_enumerate_plates_8(model_scale, guide_scale, inner_vectorized, out
             b = pyro.sample("b_{}".format(i), dist.Categorical(probs_b))
             for j in inner:
                 pyro.sample("c_{}_{}".format(i, j),
-                            dist.Categorical(probs_c[a.unsqueeze(-1), b.unsqueeze(-1), c_ind]),
+                            dist.Categorical(Vindex(probs_c)[a, b]),
                             obs=data[j, i])
 
     @config_enumerate
@@ -2876,14 +2867,14 @@ def test_elbo_zip(gate, rate):
         dist1 = dist.Delta(torch.tensor(0.))
         dist0 = dist.Poisson(rate)
         with pyro.plate("data", len(data)):
-            mask = pyro.sample("mask", dist.Bernoulli(gate), infer={"enumerate": "parallel"}).byte()
+            mask = pyro.sample("mask", dist.Bernoulli(gate), infer={"enumerate": "parallel"}).bool()
             pyro.sample("obs", dist.MaskedMixture(mask, dist0, dist1), obs=data)
 
     def guide(data):
         pass
 
-    gate = pyro.param("gate", torch.tensor(gate), constraint=constraints.unit_interval)
-    rate = pyro.param("rate", torch.tensor(rate), constraint=constraints.positive)
+    pyro.param("gate", torch.tensor(gate), constraint=constraints.unit_interval)
+    pyro.param("rate", torch.tensor(rate), constraint=constraints.positive)
 
     data = torch.tensor([0., 1., 2.])
     elbo = TraceEnum_ELBO(max_plate_nesting=1, strict_enumeration_warning=False)
@@ -3181,3 +3172,52 @@ def test_backwardsample_posterior_restrictions(ok, enumerate_guide, num_particle
     else:
         with pytest.raises(NotImplementedError, match="sample_posterior"):
             elbo.sample_posterior(model, guide)
+
+
+@pytest.mark.parametrize("num_samples", [10000, 100000])
+def test_vectorized_importance(num_samples):
+
+    pyro.param("model_probs_a",
+               torch.tensor([0.45, 0.55]),
+               constraint=constraints.simplex)
+    pyro.param("model_probs_b",
+               torch.tensor([0.6, 0.4]),
+               constraint=constraints.simplex)
+    pyro.param("model_probs_c",
+               torch.tensor([[[0.4, 0.5, 0.1], [0.3, 0.5, 0.2]],
+                             [[0.3, 0.4, 0.3], [0.4, 0.4, 0.2]]]),
+               constraint=constraints.simplex)
+
+    pyro.param("guide_probs_a",
+               torch.tensor([0.33, 0.67]),
+               constraint=constraints.simplex)
+
+    pyro.param("guide_probs_b",
+               torch.tensor([0.8, 0.2]),
+               constraint=constraints.simplex)
+
+    data = torch.tensor([[0, 1], [0, 2]])
+
+    def model():
+        probs_a = pyro.param("model_probs_a")
+        probs_b = pyro.param("model_probs_b")
+        probs_c = pyro.param("model_probs_c")
+        a = pyro.sample("a", dist.Categorical(probs_a))
+        with pyro.plate("outer", 2):
+            b = pyro.sample("b", dist.Categorical(probs_b))
+            with pyro.plate("inner", 2):
+                pyro.sample("c", dist.Categorical(Vindex(probs_c)[a, b]),
+                            obs=data)
+
+    def guide():
+        probs_a = pyro.param("guide_probs_a")
+        pyro.sample("a", dist.Categorical(probs_a))
+        probs_b = pyro.param("guide_probs_b")
+        with pyro.plate("outer", 2):
+            pyro.sample("b", dist.Categorical(probs_b))
+
+    vectorized_weights, _, _ = vectorized_importance_weights(model, guide, max_plate_nesting=4, num_samples=num_samples)
+
+    elbo = Trace_ELBO(vectorize_particles=True, num_particles=num_samples).loss(model, guide)
+
+    assert_equal(vectorized_weights.sum().item() / num_samples, -elbo, prec=0.02)

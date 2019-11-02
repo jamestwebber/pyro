@@ -1,8 +1,9 @@
-from __future__ import absolute_import, division, print_function
+import warnings
 
 import torch
 
 import pyro
+import pyro.optim
 import pyro.poutine as poutine
 from pyro.infer.abstract_infer import TracePosterior
 from pyro.infer.elbo import ELBO
@@ -63,6 +64,9 @@ class SVI(TracePosterior):
             self.loss_and_grads = loss_and_grads
 
     def run(self, *args, **kwargs):
+        warnings.warn('SVI will not derive from TracePosterior, and this method might be '
+                      'unavailable in future releases. For predictions, use the '
+                      '`pyro.infer.Predictive` class directly.', DeprecationWarning)
         if self.num_steps > 0:
             with poutine.block():
                 for i in range(self.num_steps):

@@ -1,5 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
 import math
 
 import torch
@@ -84,16 +82,15 @@ class MixtureOfDiagNormalsSharedCovariance(TorchDistribution):
         return new
 
     def log_prob(self, value):
-        # TODO: use torch.logsumexp once it's in PyTorch release
         coord_scale = self.coord_scale.unsqueeze(-2) if self.batch_mode else self.coord_scale
         epsilon = (value.unsqueeze(-2) - self.locs) / coord_scale  # L B K D
         eps_sqr = 0.5 * torch.pow(epsilon, 2.0).sum(-1)  # L B K
         eps_sqr_min = torch.min(eps_sqr, -1)[0]  # L B
-        result = self.probs * torch.exp(-eps_sqr + eps_sqr_min.unsqueeze(-1))  # L B K
-        result = torch.log(result.sum(-1))  # L B
-        result -= 0.5 * math.log(2.0 * math.pi) * float(self.dim)
-        result -= torch.log(self.coord_scale).sum(-1)
-        result -= eps_sqr_min
+        result = self.categorical.logits + (-eps_sqr + eps_sqr_min.unsqueeze(-1))  # L B K
+        result = torch.logsumexp(result, dim=-1)  # L B
+        result = result - (0.5 * math.log(2.0 * math.pi) * float(self.dim))
+        result = result - (torch.log(self.coord_scale).sum(-1))
+        result = result - eps_sqr_min
         return result
 
     def rsample(self, sample_shape=torch.Size()):
@@ -106,7 +103,7 @@ class _MixDiagNormalSharedCovarianceSample(Function):
     @staticmethod
     def forward(ctx, locs, coord_scale, component_logits, pis, which, noise_shape):
         dim = coord_scale.size(-1)
-        white = locs.new(noise_shape).normal_()
+        white = torch.randn(noise_shape, dtype=locs.dtype, device=locs.device)
         n_unsqueezes = locs.dim() - which.dim()
         for _ in range(n_unsqueezes):
             which = which.unsqueeze(-1)
@@ -130,7 +127,7 @@ class _MixDiagNormalSharedCovarianceSample(Function):
         mu_ab = locs_tilde.unsqueeze(-2) - locs_tilde.unsqueeze(-3)  # b k j i
         mu_ab_norm = torch.pow(mu_ab, 2.0).sum(-1).sqrt()  # b k j
         mu_ab /= mu_ab_norm.unsqueeze(-1)  # b k j i
-        diagonals = z.new_empty((K,), dtype=torch.long)
+        diagonals = torch.empty((K,), dtype=torch.long, device=z.device)
         torch.arange(K, out=diagonals)
         mu_ab[..., diagonals, diagonals, :] = 0.0
 

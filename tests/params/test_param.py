@@ -1,5 +1,3 @@
-from __future__ import absolute_import, division, print_function
-
 from copy import copy
 from unittest import TestCase
 
@@ -123,3 +121,13 @@ def test_dict_interface():
     assert param_store['y'].shape == (4, 5)
     assert_equal(param_store.setdefault('y', torch.zeros(4, 5)), torch.ones(4, 5))
     assert_equal(param_store['y'].unconstrained(), torch.zeros(4, 5))
+
+    # remove y
+    del param_store['y']
+    assert not param_store
+    assert len(param_store) == 0
+    assert 'x' not in param_store
+    assert 'y' not in param_store
+    assert list(param_store.keys()) == []
+    assert list(key for key, value in param_store.items()) == []
+    assert len(list(param_store.values())) == 0
